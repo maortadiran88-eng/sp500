@@ -4,6 +4,7 @@ let countdown   = null;
 let prevData    = {};   // { sym: { price, ma } }
 let rows        = {};   // { sym: rowData }
 let alerts      = [];
+let scanAlerts  = [];   // התראות של הסריקה הנוכחית (להיסטוריה)
 let activeList  = null; // key of LISTS
 let timeframe   = 'daily';
 let maPeriod    = 150;
@@ -126,6 +127,7 @@ function beep(type) {
 // ── FETCH ──────────────────────────────────────
 async function fetchStock(sym) {
   readSettings();
+  sym = String(sym).replace(/\./g, '-');   // BRK.B -> BRK-B (פורמט Yahoo)
   const interval = timeframe === 'weekly' ? '1wk' : '1d';
   const range    = timeframe === 'weekly'
     ? (maPeriod <= 52 ? '2y' : '5y')
@@ -206,7 +208,9 @@ function addAlert(sym, name, price, ma, dir, slope, volRatio, ago) {
   const buy   = isBuy(dir, slope, price, ma, ago);
   const tf    = timeframe === 'weekly' ? 'שבועי' : 'יומי';
   const isH   = ago > 0;
-  alerts.unshift({ sym, name, price, ma, dir, slope, volRatio, ago, buy, isH, tf, mp: maPeriod, time: fmtT() });
+  const alertObj = { sym, name, price, ma, dir, slope, volRatio, ago, buy, isH, tf, mp: maPeriod, time: fmtT() };
+  alerts.unshift(alertObj);
+  scanAlerts.push(alertObj);
   if (alerts.length > 100) alerts.pop();
   $('alertCount').textContent = alerts.length + ' התראות';
   $('crossStat').textContent  = alerts.length;
@@ -310,7 +314,7 @@ function renderTable() {
     const volClr    = volOk ? 'var(--green)' : volLow ? 'var(--muted)' : 'var(--blue)';
     const volBar    = d.volRatio != null
       ? `<div style="display:flex;align-items:center;gap:4px">
-          <div style="width:40px;height:4px;background:var(--border);border-radius:2px">
+          <div style="width:40px;height:4px;background:var(--bdr);border-radius:2px">
             <div style="width:${Math.min(d.volRatio/2,1)*100}%;height:100%;background:${volClr};border-radius:2px"></div>
           </div>
           <span style="color:${volClr};font-size:11px">${d.volRatio.toFixed(1)}x</span>
@@ -377,6 +381,7 @@ async function runScan() {
   const list = activeList ? LISTS[activeList].data : null;
   if (!list) return;
 
+  scanAlerts = [];
   $('statusDot').className = 'dot scanning';
   $('statusText').textContent = 'סורק...';
   $('progWrap').style.display = 'block';
@@ -430,12 +435,16 @@ async function runScan() {
     await sleep(380);
   }
 
+  const completed = scanning;   // false אם נלחץ "עצור" באמצע
   $('progWrap').style.display = 'none';
-  $('statusDot').className = 'dot live';
-  const tf = timeframe === 'weekly' ? 'שבועי' : 'יומי';
-  $('statusText').textContent = `הושלם · ${fmtT()} · ${tf} SMA${maPeriod}`;
+  if (completed) {
+    $('statusDot').className = 'dot live';
+    const tf = timeframe === 'weekly' ? 'שבועי' : 'יומי';
+    $('statusText').textContent = `הושלם · ${fmtT()} · ${tf} SMA${maPeriod}`;
+  }
   renderTable();
-  if (scanning) startCountdown();
+  saveScanToHistory(!completed);   // שמירת הממצאים להיסטוריה
+  if (completed) startCountdown();
 }
 
 function startCountdown() {
@@ -479,6 +488,259 @@ function clearAll() {
 window.addEventListener('DOMContentLoaded', () => {
   updateSoundBtn();
   renderAlerts();
+  loadCachedLists();      // רשימות מעודכנות שנשמרו (אם יש)
   renderTable();
+  loadHistory();
+  renderHistory();
   loadAndApply();
+  autoUpdateLists();      // עדכון ברקע אם עברו 7 ימים
 });
+
+
+// ═══════════════════════════════════════════════════════════
+//  עדכון רשימות האינדקסים (S&P 500 / S&P 100 / Nasdaq 100)
+//  המקור: Wikipedia (API רשמי עם CORS — לא צריך proxy)
+// ═══════════════════════════════════════════════════════════
+const LK            = 'sma_scanner_lists_v1';
+const LIST_MAX_AGE  = 7 * 24 * 3600 * 1000;           // שבוע
+const LIST_PAGES    = { SP500: 'List_of_S&P_500_companies', SP100: 'S&P_100', NQ100: 'Nasdaq-100' };
+const LIST_MIN      = { SP500: 480, SP100: 95, NQ100: 95 };   // הגנה מרשימה חלקית/שבורה
+let   listsUpdating = false;
+
+function normSym(s) {
+  return String(s || '').replace(/\[.*?\]/g, '').trim().toUpperCase().replace(/\./g, '-');
+}
+function cleanName(s) {
+  return String(s || '').replace(/\[.*?\]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+async function fetchWikiList(key) {
+  const url = 'https://en.wikipedia.org/w/api.php?action=parse&format=json&formatversion=2'
+            + '&prop=text&redirects=1&origin=*&page=' + encodeURIComponent(LIST_PAGES[key]);
+  const res = await fetch(url, { signal: AbortSignal.timeout(25000) });
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const json = await res.json();
+  const html = json?.parse?.text;
+  if (!html) throw new Error('no page');
+  const doc  = new DOMParser().parseFromString(html, 'text/html');
+  let best = [];
+  doc.querySelectorAll('table.wikitable').forEach(t => {
+    const trs = [...t.querySelectorAll('tr')];
+    const hi  = trs.findIndex(r => r.querySelector('th'));
+    if (hi < 0) return;
+    const hdr = [...trs[hi].children].map(h => h.textContent.trim().toLowerCase());
+    const si  = hdr.findIndex(h => /^(symbol|ticker)/.test(h));
+    const ni  = hdr.findIndex(h => /^(company|security|name)/.test(h));
+    if (si < 0 || ni < 0) return;
+    const seen = new Set(), out = [];
+    trs.slice(hi + 1).forEach(r => {
+      const c = r.children;
+      if (c.length <= Math.max(si, ni)) return;
+      const sym = normSym(c[si].textContent);
+      if (!/^[A-Z]{1,5}(-[A-Z])?$/.test(sym) || seen.has(sym)) return;
+      seen.add(sym);
+      out.push([sym, cleanName(c[ni].textContent) || sym]);
+    });
+    if (out.length > best.length) best = out;
+  });
+  if (best.length < LIST_MIN[key]) throw new Error('רשימה קצרה מדי (' + best.length + ')');
+  return best;
+}
+
+function applyList(key, arr, source) {
+  LISTS[key].data   = arr;
+  LISTS[key].count  = arr.length;
+  LISTS[key].source = source;
+}
+
+function refreshListUI() {
+  Object.keys(LISTS).forEach(k => {
+    const el = $('cnt_' + k);
+    if (el) el.textContent = LISTS[k].count;
+  });
+  if (activeList && LISTS[activeList])
+    $('listLabel').textContent = LISTS[activeList].label + ' (' + LISTS[activeList].count + ')';
+}
+
+function setListsInfo(msg, color) {
+  const el = $('listsInfo');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.color = color || 'var(--muted)';
+}
+
+function loadCachedLists() {
+  try {
+    const c = JSON.parse(localStorage.getItem(LK));
+    if (!c || !c.lists) return;
+    Object.keys(c.lists).forEach(k => {
+      if (LISTS[k] && Array.isArray(c.lists[k]) && c.lists[k].length >= LIST_MIN[k])
+        applyList(k, c.lists[k], 'wiki');
+    });
+    refreshListUI();
+    setListsInfo('רשימות עודכנו: ' + new Date(c.ts).toLocaleString('he-IL'));
+  } catch (e) {}
+}
+
+function autoUpdateLists() {
+  let ts = 0;
+  try { ts = JSON.parse(localStorage.getItem(LK))?.ts || 0; } catch (e) {}
+  if (Date.now() - ts > LIST_MAX_AGE) updateLists(false);
+}
+
+async function updateLists(manual) {
+  if (listsUpdating) return;
+  listsUpdating = true;
+  const btn = $('updListsBtn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ מעדכן...'; }
+  setListsInfo('מוריד רשימות עדכניות...', 'var(--amber)');
+  const keys = Object.keys(LIST_PAGES);
+  const results = await Promise.allSettled(keys.map(fetchWikiList));
+  let cached = {};
+  try { cached = JSON.parse(localStorage.getItem(LK))?.lists || {}; } catch (e) {}
+  const ok = [], fail = [];
+  results.forEach((r, i) => {
+    const k = keys[i];
+    if (r.status === 'fulfilled') { applyList(k, r.value, 'wiki'); cached[k] = r.value; ok.push(k); }
+    else fail.push(k);
+  });
+  if (ok.length) {
+    try { localStorage.setItem(LK, JSON.stringify({ ts: Date.now(), lists: cached })); } catch (e) {}
+  }
+  refreshListUI();
+  if (activeList && !scanning && ok.includes(activeList)) { rows = {}; prevData = {}; renderTable(); }
+  if (btn) { btn.disabled = false; btn.textContent = '🔄 עדכן רשימות'; }
+  const names = k => LISTS[k].label + ' ' + LISTS[k].count;
+  if (!fail.length)
+    setListsInfo('✓ עודכן: ' + ok.map(names).join(' · '), 'var(--green)');
+  else if (ok.length)
+    setListsInfo('עודכן חלקית: ' + ok.map(names).join(' · ') + ' | נכשל: ' + fail.map(k => LISTS[k].label).join(', '), 'var(--amber)');
+  else
+    setListsInfo(manual ? '✗ העדכון נכשל — נשארת הרשימה השמורה' : 'עדכון אוטומטי נכשל — נשארת הרשימה השמורה', 'var(--red)');
+  listsUpdating = false;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  היסטוריית סריקות — נשמרת אחרי כל סריקה, עם אפשרות מחיקה
+// ═══════════════════════════════════════════════════════════
+const HK       = 'sma_scanner_history_v1';
+const HIST_MAX = 30;                 // מקסימום סריקות שנשמרות
+let history    = [];
+const histOpen = new Set();
+
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function loadHistory() {
+  try { history = JSON.parse(localStorage.getItem(HK)) || []; } catch (e) { history = []; }
+  if (!Array.isArray(history)) history = [];
+}
+function persistHistory() {
+  for (;;) {
+    try { localStorage.setItem(HK, JSON.stringify(history)); return; }
+    catch (e) { if (history.length <= 1) return; history.pop(); }   // אין מקום — מוחקים את הישנה ביותר
+  }
+}
+
+function saveScanToHistory(partial) {
+  const all  = Object.values(rows);
+  const live = all.filter(d => d.ma && d.price);
+  if (!live.length) return;
+  readSettings();
+  const found = new Map();
+  scanAlerts.forEach(al => {
+    if (found.has(al.sym)) return;
+    found.set(al.sym, {
+      sym: al.sym, name: al.name, price: al.price, ma: al.ma,
+      diff: ((al.price - al.ma) / al.ma) * 100,
+      type: al.buy ? 'buy' : (al.dir === 'up' ? 'up' : 'down'),
+      ago: al.ago || 0, slope: al.slope, vol: al.volRatio
+    });
+  });
+  live.forEach(d => {
+    if (found.has(d.sym)) return;
+    const diff = ((d.price - d.ma) / d.ma) * 100;
+    if (Math.abs(diff) <= nearPct)
+      found.set(d.sym, { sym: d.sym, name: d.name, price: d.price, ma: d.ma, diff,
+                         type: 'near', ago: 0, slope: d.slope, vol: d.volRatio });
+  });
+  const order = { buy: 0, up: 1, down: 2, near: 3 };
+  const items = [...found.values()].sort((x, y) => order[x.type] - order[y.type] || x.sym.localeCompare(y.sym));
+  history.unshift({
+    id: Date.now(),
+    time: new Date().toLocaleString('he-IL'),
+    list: activeList ? LISTS[activeList].label : '—',
+    tf: timeframe === 'weekly' ? 'שבועי' : 'יומי',
+    mp: maPeriod, near: nearPct,
+    scanned: all.length,
+    above: live.filter(d => d.price >= d.ma).length,
+    below: live.filter(d => d.price <  d.ma).length,
+    partial: !!partial,
+    found: items
+  });
+  if (history.length > HIST_MAX) history.length = HIST_MAX;
+  persistHistory();
+  renderHistory();
+}
+
+const H_TYPE = {
+  buy:  ['🟢 קנייה',     'up'],
+  up:   ['▲ חצה מעלה',   'up'],
+  down: ['▼ חצה מטה',    'dn'],
+  near: ['⚡ קרוב ל-SMA', '']
+};
+
+function renderHistory() {
+  const box = $('histBox');
+  if (!box) return;
+  $('histCount').textContent = history.length + ' סריקות';
+  if ($('histClearBtn')) $('histClearBtn').style.display = history.length ? '' : 'none';
+  if (!history.length) {
+    box.innerHTML = '<div class="empty">אין היסטוריה עדיין — הממצאים נשמרים אוטומטית אחרי כל סריקה</div>';
+    return;
+  }
+  box.innerHTML = history.map(h => {
+    const cnt = t => h.found.filter(f => f.type === t).length;
+    const body = h.found.length ? `<div class="tbl-wrap" style="max-height:320px"><table class="hist-tbl">
+        <thead><tr><th>סימול</th><th>שם</th><th>סוג</th><th>מחיר</th><th>SMA</th><th>פער %</th><th>נפח</th></tr></thead>
+        <tbody>${h.found.map(f => {
+          const [lbl, cls] = H_TYPE[f.type] || ['', ''];
+          return `<tr>
+            <td class="tsym">${esc(f.sym)}</td>
+            <td class="tname">${esc(f.name)}</td>
+            <td class="${cls}">${lbl}${f.ago > 0 ? ' (לפני ' + f.ago + ' נרות)' : ''}</td>
+            <td>${fmt$(f.price)}</td>
+            <td style="color:var(--blue)">${fmt$(f.ma)}</td>
+            <td class="${f.diff >= 0 ? 'up' : 'dn'}">${fmtP(f.diff)}</td>
+            <td>${f.vol != null ? f.vol.toFixed(1) + 'x' : '—'}</td></tr>`;
+        }).join('')}</tbody></table></div>`
+      : '<div class="empty">לא נמצאו חציות / סיגנלים בסריקה הזו</div>';
+    return `<details class="hist-item"${histOpen.has(h.id) ? ' open' : ''} ontoggle="histToggle(${h.id}, this.open)">
+      <summary>
+        <span class="hist-time">${esc(h.time)}</span>
+        <span class="hist-meta">${esc(h.list)} · ${esc(h.tf)} SMA${h.mp} · קרוב ${h.near}%</span>
+        <span class="badge green">🟢 ${cnt('buy')}</span>
+        <span class="badge amber">🔔 ${cnt('up') + cnt('down')}</span>
+        <span class="badge vol">⚡ ${cnt('near')}</span>
+        <span class="hist-meta">נסרקו ${h.scanned} · ↑${h.above} ↓${h.below}${h.partial ? ' · <b style="color:var(--amber)">חלקית</b>' : ''}</span>
+        <button type="button" class="icon-btn hist-del" title="מחק סריקה זו" onclick="event.preventDefault();deleteHistoryItem(${h.id})">🗑</button>
+      </summary>${body}</details>`;
+  }).join('');
+}
+
+function histToggle(id, open) { open ? histOpen.add(id) : histOpen.delete(id); }
+
+function deleteHistoryItem(id) {
+  history = history.filter(h => h.id !== id);
+  histOpen.delete(id);
+  persistHistory();
+  renderHistory();
+}
+
+function clearHistory() {
+  if (!history.length) return;
+  if (!confirm('למחוק את כל היסטוריית הסריקות? (' + history.length + ' סריקות)')) return;
+  history = [];
+  histOpen.clear();
+  try { localStorage.removeItem(HK); } catch (e) {}
+  renderHistory();
+}

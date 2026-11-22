@@ -267,6 +267,22 @@ td { padding:8px 10px; font-family:'Share Tech Mono',monospace; font-size:12px; 
 }
 .toast-ok:hover { background:var(--green); color:var(--bg); }
 
+/* ── HISTORY ── */
+.hist-item { background:var(--panel); border:1px solid var(--bdr); margin-bottom:6px; }
+.hist-item > summary {
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:9px 14px; cursor:pointer; list-style:none; user-select:none;
+}
+.hist-item > summary::-webkit-details-marker { display:none; }
+.hist-item > summary::before { content:'◂'; color:var(--blue); font-size:12px; }
+.hist-item[open] > summary::before { content:'▾'; }
+.hist-item > summary:hover { background:rgba(0,170,255,.04); }
+.hist-time { font-family:'Share Tech Mono',monospace; font-size:12px; color:#fff; }
+.hist-meta { font-size:12px; color:var(--muted); }
+.hist-del  { margin-right:auto; padding:2px 8px; }
+.hist-del:hover { border-color:var(--red); color:var(--red); }
+.hist-tbl  { min-width:560px; }
+#histBox   { margin-bottom:24px; }
 @media(max-width:800px) {
   .stats { grid-template-columns:repeat(2,1fr); }
   .sep   { display:none; }
@@ -300,13 +316,13 @@ td { padding:8px 10px; font-family:'Share Tech Mono',monospace; font-size:12px; 
       <div style="font-size:10px;letter-spacing:2px;color:var(--muted);margin-bottom:6px">אינדקס</div>
       <div style="display:flex;gap:6px">
         <button class="list-btn" id="btn_SP500" onclick="selectList('SP500',this)">
-          <span class="list-count">503</span>S&amp;P 500
+          <span class="list-count" id="cnt_SP500">513</span>S&amp;P 500
         </button>
         <button class="list-btn" id="btn_SP100" onclick="selectList('SP100',this)">
-          <span class="list-count">100</span>S&amp;P 100
+          <span class="list-count" id="cnt_SP100">101</span>S&amp;P 100
         </button>
         <button class="list-btn" id="btn_NQ100" onclick="selectList('NQ100',this)">
-          <span class="list-count">100</span>Nasdaq 100
+          <span class="list-count" id="cnt_NQ100">102</span>Nasdaq 100
         </button>
       </div>
     </div>
@@ -380,6 +396,8 @@ td { padding:8px 10px; font-family:'Share Tech Mono',monospace; font-size:12px; 
   <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
     <span style="font-size:10px;letter-spacing:2px;color:var(--muted)">פעיל:</span>
     <span id="listLabel" style="font-family:'Share Tech Mono',monospace;font-size:13px;color:var(--blue)">— לא נבחר —</span>
+    <button class="btn btn-sm" id="updListsBtn" onclick="updateLists(true)" title="מוריד את הרכב האינדקסים העדכני מ-Wikipedia">🔄 עדכן רשימות</button>
+    <span class="status-txt" id="listsInfo"></span>
   </div>
 </div>
 
@@ -453,6 +471,15 @@ td { padding:8px 10px; font-family:'Share Tech Mono',monospace; font-size:12px; 
     </tbody>
   </table>
 </div>
+
+<!-- ══ HISTORY ══ -->
+<div class="sec-hdr" style="margin-top:18px">
+  <div class="sec-lbl">🕘 היסטוריית סריקות</div>
+  <div class="sec-line"></div>
+  <span class="status-txt" id="histCount">0 סריקות</span>
+  <button class="btn btn-sm" id="histClearBtn" onclick="clearHistory()" style="display:none">🗑 מחק היסטוריה</button>
+</div>
+<div id="histBox"><div class="empty">אין היסטוריה עדיין — הממצאים נשמרים אוטומטית אחרי כל סריקה</div></div>
 
 </div><!-- /wrap -->
 
